@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Delivery Assistant - Step Functions + Amazon Bedrock
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        BEDROCK_MODEL_ID: anthropic.claude-3-5-sonnet-20241022-v2:0
+
+Resources:
+
+  ##########################
+  # DynamoDB
+  ##########################
+  CardapioTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: delivery-cardapio
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: nome
+          AttributeType: S
+      KeySchema:
+        - AttributeName: nome
+          KeyType: HASH
+
+  PedidosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: delivery-pedidos
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pedidoId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pedidoId
+          KeyType: HASH
+
+  ##########################
+  # SNS (notificacoes)
+  ##########################
+  NotificacoesTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: delivery-notificacoes
+
+  ##########################
+  # Lambdas
+  ##########################
+  ClassificarIntencaoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/classificar_intencao/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: "*"
+
+  ValidarPedidoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/validar_pedido/
+      Handler: app.lambda_handler
+
+  ConsultarCardapioFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/consultar_cardapio/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          CARDAPIO_TABLE: !Ref CardapioTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref CardapioTable
+
+  CalcularFreteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/calcular_frete/
+      Handler: app.lambda_handler
+
+  ConsultarStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/consultar_status/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          PEDIDOS_TABLE: !Ref PedidosTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref PedidosTable
+
+  CancelarPedidoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/cancelar_pedido/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          PEDIDOS_TABLE: !Ref PedidosTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PedidosTable
+
+  GerarRespostaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/gerar_resposta/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: "*"
+
+  ##########################
+  # Step Functions
+  ##########################
+  DeliveryStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: delivery-assistant-flow
+      DefinitionUri: ../statemachine/delivery.asl.json
+      DefinitionSubstitutions:
+        ClassificarIntencaoFunctionArn: !GetAtt ClassificarIntencaoFunction.Arn
+        ValidarPedidoFunctionArn: !GetAtt ValidarPedidoFunction.Arn
+        ConsultarCardapioFunctionArn: !GetAtt ConsultarCardapioFunction.Arn
+        CalcularFreteFunctionArn: !GetAtt CalcularFreteFunction.Arn
+        ConsultarStatusFunctionArn: !GetAtt ConsultarStatusFunction.Arn
+        CancelarPedidoFunctionArn: !GetAtt CancelarPedidoFunction.Arn
+        GerarRespostaFunctionArn: !GetAtt GerarRespostaFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ClassificarIntencaoFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ValidarPedidoFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ConsultarCardapioFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CalcularFreteFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ConsultarStatusFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CancelarPedidoFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref GerarRespostaFunction
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /assistente
+            Method: post
+            RestApiId: !Ref DeliveryApi
+
+  ##########################
+  # API Gateway
+  ##########################
+  DeliveryApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+
+Outputs:
+  ApiEndpoint:
+    Description: Endpoint publico do assistente de delivery
+    Value: !Sub "https://${DeliveryApi}.execute-api.${AWS::Region}.amazonaws.com/prod/assistente"
+
+  StateMachineArn:
+    Description: ARN da state machine do Step Functions
+    Value: !Ref DeliveryStateMachine

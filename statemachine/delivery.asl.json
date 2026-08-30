@@ -1,0 +1,173 @@
+{
+  "Comment": "Assistente de Delivery - orquestra intencao, negocio e resposta via Bedrock",
+  "StartAt": "ClassificarIntencao",
+  "States": {
+    "ClassificarIntencao": {
+      "Type": "Task",
+      "Resource": "${ClassificarIntencaoFunctionArn}",
+      "ResultPath": "$.classificacao",
+      "Retry": [
+        {
+          "ErrorEquals": ["Bedrock.ThrottlingException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.erro",
+          "Next": "FalhaClassificacao"
+        }
+      ],
+      "Next": "RotearIntencao"
+    },
+
+    "FalhaClassificacao": {
+      "Type": "Pass",
+      "Parameters": {
+        "tipo": "erro",
+        "mensagem": "Nao consegui entender sua mensagem, pode reformular?"
+      },
+      "ResultPath": "$.resultadoNegocio",
+      "Next": "GerarRespostaNatural"
+    },
+
+    "RotearIntencao": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.classificacao.intencao",
+          "StringEquals": "novo_pedido",
+          "Next": "ValidarPedido"
+        },
+        {
+          "Variable": "$.classificacao.intencao",
+          "StringEquals": "consultar_status",
+          "Next": "ConsultarStatus"
+        },
+        {
+          "Variable": "$.classificacao.intencao",
+          "StringEquals": "cancelar",
+          "Next": "CancelarPedido"
+        }
+      ],
+      "Default": "RespostaGenerica"
+    },
+
+    "ValidarPedido": {
+      "Type": "Task",
+      "Resource": "${ValidarPedidoFunctionArn}",
+      "ResultPath": "$.validacao",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["PedidoInvalidoError"],
+          "ResultPath": "$.erro",
+          "Next": "PedidoInvalido"
+        }
+      ],
+      "Next": "ConsultarCardapioEFrete"
+    },
+
+    "PedidoInvalido": {
+      "Type": "Pass",
+      "Parameters": {
+        "tipo": "pedido_invalido",
+        "mensagem": "Alguns itens do seu pedido nao foram encontrados ou estao indisponiveis."
+      },
+      "ResultPath": "$.resultadoNegocio",
+      "Next": "GerarRespostaNatural"
+    },
+
+    "ConsultarCardapioEFrete": {
+      "Type": "Parallel",
+      "ResultPath": "$.paralelo",
+      "Branches": [
+        {
+          "StartAt": "ConsultarCardapio",
+          "States": {
+            "ConsultarCardapio": {
+              "Type": "Task",
+              "Resource": "${ConsultarCardapioFunctionArn}",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CalcularFrete",
+          "States": {
+            "CalcularFrete": {
+              "Type": "Task",
+              "Resource": "${CalcularFreteFunctionArn}",
+              "End": true
+            }
+          }
+        }
+      ],
+      "Next": "ConfirmarPedido"
+    },
+
+    "ConfirmarPedido": {
+      "Type": "Pass",
+      "Parameters": {
+        "tipo": "pedido_confirmado",
+        "itens.$": "$.paralelo[0]",
+        "frete.$": "$.paralelo[1]"
+      },
+      "ResultPath": "$.resultadoNegocio",
+      "Next": "GerarRespostaNatural"
+    },
+
+    "ConsultarStatus": {
+      "Type": "Task",
+      "Resource": "${ConsultarStatusFunctionArn}",
+      "ResultPath": "$.resultadoNegocio",
+      "Next": "GerarRespostaNatural"
+    },
+
+    "CancelarPedido": {
+      "Type": "Task",
+      "Resource": "${CancelarPedidoFunctionArn}",
+      "ResultPath": "$.resultadoNegocio",
+      "Next": "GerarRespostaNatural"
+    },
+
+    "RespostaGenerica": {
+      "Type": "Pass",
+      "Parameters": {
+        "tipo": "duvida_geral"
+      },
+      "ResultPath": "$.resultadoNegocio",
+      "Next": "GerarRespostaNatural"
+    },
+
+    "GerarRespostaNatural": {
+      "Type": "Task",
+      "Resource": "${GerarRespostaFunctionArn}",
+      "ResultPath": "$.respostaFinal",
+      "Retry": [
+        {
+          "ErrorEquals": ["Bedrock.ThrottlingException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "End": true
+    }
+  }
+}
